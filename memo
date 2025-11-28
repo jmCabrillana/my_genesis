@@ -1,3 +1,4 @@
 # cuda 12.8
 pip install genesis-world
-
+pip install fvcore iopath
+pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git"

@@ -7,7 +7,7 @@ gs.init(
     seed=0,
     precision="32",
     logging_level="info",
-    backend=gs.gpu,  # or gs.cpu if you just want to sanity-check
+    backend=gs.gpu,  
 )
 
 ########################## scene ##########################
@@ -19,7 +19,7 @@ scene = gs.Scene(
         requires_grad=True,   # <- turn on differentiable mode
     ),
     mpm_options=gs.options.MPMOptions(
-        lower_bound=(-0.5, -0.5, 0.0),
+        lower_bound=(-0.5, -0.5, -0.1),
         upper_bound=(0.5, 0.5, 1.5),
         grid_density=64,
     ),
@@ -27,12 +27,13 @@ scene = gs.Scene(
         camera_pos=(2.0, 0.0, 1.2),
         camera_lookat=(0.0, 0.0, 0.5),
         camera_fov=40,
+        max_FPS=60,
     ),
     vis_options=gs.options.VisOptions(
         show_world_frame=True,
         visualize_mpm_boundary=False,
     ),
-    renderer=gs.renderers.BatchRenderer(use_rasterizer=True),
+    renderer=gs.renderers.Rasterizer(),  #gs.renderers.BatchRenderer(use_rasterizer=True),
     show_viewer=False,
 )
 
@@ -62,6 +63,14 @@ pole = scene.add_entity(
     vis_mode="particle",
 )
 
+cam = scene.add_camera(
+    res=(640, 480),
+    pos=(2.0, 0.0, 1.2),
+    lookat=(0.0, 0.0, 0.5),
+    fov=40,
+    GUI=False,
+)
+
 ########################## build ##########################
 scene.build()
 
@@ -86,10 +95,7 @@ n_iters = 20          # optimization iterations
 device = pos0.device
 
 # control sequence: one scalar horizontal velocity for the cart region at each step
-v_seq = [
-    gs.tensor([0.0], requires_grad=True, device=device)
-    for _ in range(horizon)
-]
+v_seq = [gs.tensor([0.0]) for _ in range(horizon)]
 
 optimizer = torch.optim.Adam(v_seq, lr=0.5)
 
@@ -97,10 +103,6 @@ optimizer = torch.optim.Adam(v_seq, lr=0.5)
 for it in range(n_iters):
     # reset sim
     scene.reset()
-
-    # (optional) small initial tilt to make it non-trivial
-    # You can also perturb positions directly if you want.
-    # For now we just let gravity do the work.
 
     # rollout
     for t in range(horizon):
@@ -110,25 +112,24 @@ for it in range(n_iters):
         # except cart region gets v_t in x direction.
         vel = torch.zeros((pole.n_particles, 3), device=device)
         vel[base_idx, 0] = v_t
-
         pole.set_velocity(vel)   # this writes into the MPM solver field
-
         scene.step()
 
     # compute loss at the end of rollout
     state = pole.get_state()
-    pos = state.pos  # [n_particles, 3]
+    pos = state.pos  # [B, N, 3]
 
-    com = pos.mean(dim=0)      # center of mass (x, y, z)
+    # center of mass per environment
+    com = pos.mean(dim=1)  # [B, 3]
 
-    # anchor at ground under COM in x–z plane
-    # angle = 0 means pointing straight up (positive z)
-    angle = torch.atan2(com[0], com[2])  # angle in x–z plane
+    # angle in x–z plane per environment
+    angle = torch.atan2(com[:, 0], com[:, 2])  # [B]
 
-    cart_x = com[0]  # crude "cart position"
+    # "cart position" per environment
+    cart_x = com[:, 0]  # [B]
 
-    # loss = angle^2 + small penalty on cart displacement
-    loss = angle**2 + 0.1 * cart_x**2
+    # scalar loss: average over batch
+    loss = (angle**2 + 0.1 * cart_x**2).mean()  # shape []
 
     optimizer.zero_grad()
     loss.backward()
@@ -145,14 +146,6 @@ print("Optimization done.")
 # Run one rollout with the learned v_seq and record as MP4.
 # This uses the same cam pattern you already have working.
 
-cam = scene.add_camera(
-    res=(640, 480),
-    pos=(2.0, 0.0, 1.2),
-    lookat=(0.0, 0.0, 0.5),
-    fov=40,
-    GUI=False,
-)
-
 scene.reset()
 cam.start_recording()
 
@@ -166,6 +159,6 @@ for t in range(horizon):
     scene.step()
     cam.render(rgb=True)
 
-cam.stop_recording(save_to_filename="mpm_cartpole.mp4", fps=int(1.0 / scene.dt))
+cam.stop_recording(save_to_filename="runs/mpm_cartpole.mp4", fps=int(1.0 / scene.dt))
 
 print("Saved video to mpm_cartpole.mp4")
